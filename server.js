@@ -587,7 +587,10 @@ app.post("/v1/chat/completions", async (req, reply) => {
       .map(prepareMessageForLLM)
       .filter(Boolean);
 
-    const oldEvents = stripPosition(
+    const hasUserMessage = kelivoMessages.some(m => m.role === "user");
+    let oldEvents = [];
+    if(!hasUserMessage){
+     oldEvents = stripPosition(
       oldTimeline.filter(isSpecialEvent).sort((a, b) => {
         const timeA = extractTimestampWithMemory(a, tsDB);
         const timeB = extractTimestampWithMemory(b, tsDB);
@@ -611,6 +614,7 @@ app.post("/v1/chat/completions", async (req, reply) => {
         }
       }
       if (!inserted) llmMessages.push(event);
+      }
     }
 
 

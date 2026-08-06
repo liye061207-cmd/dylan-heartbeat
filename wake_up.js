@@ -334,10 +334,24 @@ function getLastUserTime(messages) {
   for (const msg of reversed) {
     if (msg.role === "user") {
       const content = normalizeContentToText(msg.content);
-      // 批注 2026-07-15：兼容 Kelivo 时间前缀 "YYYY-MM-DDHH:mm"；
-      // 旧的 "YYYY-MM-DD HH:mm" 仍然可用，避免无空格时间导致 wake-up 误判没有用户时间。
+      // 先尝试从消息内容中解析时间
       const parsed = parseTimelineTimestamp(content);
       if (parsed) return parsed;
+
+      // 如果内容中没有时间戳，尝试从 message_timestamps.json 中读取
+      try {
+        const tsDBPath = path.join(__dirname, "message_timestamps.json");
+        if (fs.existsSync(tsDBPath)) {
+          const tsDB = JSON.parse(fs.readFileSync(tsDBPath, "utf-8"));
+          // 用消息指纹查找
+          const fp = `${msg.role}::${content.slice(0, 150)}`;
+          if (tsDB[fp]) {
+            return new Date(tsDB[fp]);
+          }
+        }
+      } catch (e) {
+        // 忽略读取错误
+      }
     }
   }
   return null;

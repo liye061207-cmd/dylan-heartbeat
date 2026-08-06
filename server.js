@@ -600,6 +600,17 @@ if (lastUserMsg) {
     const llmMessages = kelivoMessages
       .map(prepareMessageForLLM)
       .filter(Boolean);
+    // ===== 剥离时间戳前缀 =====
+    const TIMESTAMP_PREFIX_PATTERN = /^\s*（?\s*\d{4}[-/]\d{1,2}[-/]\d{1,2}(?:[ T]?)\d{1,2}[:：]\d{2}[）\s]*/;
+    for (const msg of llmMessages) {
+      if (msg.role === "user" && typeof msg.content === "string") {
+        const stripped = msg.content.replace(TIMESTAMP_PREFIX_PATTERN, "");
+        if (stripped !== msg.content) {
+          msg.content = stripped;
+          console.log(`🕐 已剥离时间戳前缀: "${msg.content}"`);
+        }
+      }
+    }
 
     const hasUserMessage = kelivoMessages.some(m => m.role === "user");
     let oldEvents = [];

@@ -570,8 +570,11 @@ app.post("/v1/chat/completions", async (req, reply) => {
     for (const msg of kelivoMessages) {
       if (msg.role === "system") continue;
       if (msg.role === "tool") continue;
-      const ts = extractTimestamp(normalizeContentToText(msg.content));
-      if (!ts) continue;
+      let ts = extractTimestamp(normalizeContentToText(msg.content));
+      if (!ts) {
+        ts = new Date(); // 提取失败则使用当前服务器时间
+        console.log(`🕐 为消息生成服务器时间: ${ts.toISOString()}`);
+    }
       const fp = makeFingerprint(msg);
       const fpStripped = makeFingerprintStripped(msg);
       if (!tsDB[fp]) { tsDB[fp] = ts.toISOString(); tsDBDirty = true; }

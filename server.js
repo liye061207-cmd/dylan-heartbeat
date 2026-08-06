@@ -579,6 +579,7 @@ app.post("/v1/chat/completions", async (req, reply) => {
     if (tsDBDirty) saveTimestampDB(tsDB);
 
     const finalTimeline = buildTimeline(kelivoMessages, tsDB);
+    console.log('🟢 saveTimeline 被调用，消息数:', finalTimeline.length);
     saveTimeline(finalTimeline);
     // 记录最后用户消息时间（回退到服务器时间）
     const lastUserMsg = finalTimeline.filter(m => m.role === "user").pop();

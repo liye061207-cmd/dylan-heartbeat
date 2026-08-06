@@ -580,7 +580,21 @@ app.post("/v1/chat/completions", async (req, reply) => {
 
     const finalTimeline = buildTimeline(kelivoMessages, tsDB);
     saveTimeline(finalTimeline);
-
+    // 记录最后用户消息时间
+const lastUserMsg = finalTimeline.filter(m => m.role === "user").pop();
+if (lastUserMsg) {
+  const tsDB = loadTimestampDB();
+  const eventTime = extractTimestampWithMemory(lastUserMsg, tsDB);
+  if (eventTime) {
+    const formatted = formatDateTimeInTimeZone(eventTime, TIME_ZONE);
+    console.log(`✅ 最后用户消息时间: ${formatted}`);
+  } else {
+    console.warn("⚠️ 未找到最后用户消息的时间戳");
+  }
+} else {
+  console.warn("⚠️ 没有用户消息");
+}
+   
     // Kelivo 发图时 content 常是数组。默认原样透传给视觉模型；
     // 如上游不支持图片，可设置 MULTIMODAL_MODE=text 退回文本占位。
     const llmMessages = kelivoMessages

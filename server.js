@@ -580,17 +580,18 @@ app.post("/v1/chat/completions", async (req, reply) => {
 
     const finalTimeline = buildTimeline(kelivoMessages, tsDB);
     saveTimeline(finalTimeline);
-    // 记录最后用户消息时间
+   // 记录最后用户消息时间（回退到服务器时间）
 const lastUserMsg = finalTimeline.filter(m => m.role === "user").pop();
 if (lastUserMsg) {
   const tsDB = loadTimestampDB();
-  const eventTime = extractTimestampWithMemory(lastUserMsg, tsDB);
-  if (eventTime) {
-    const formatted = formatDateTimeInTimeZone(eventTime, TIME_ZONE);
-    console.log(`✅ 最后用户消息时间: ${formatted}`);
-  } else {
-    console.warn("⚠️ 未找到最后用户消息的时间戳");
+  let eventTime = extractTimestampWithMemory(lastUserMsg, tsDB);
+  if (!eventTime) {
+    // 提取失败则使用当前服务器时间（已转换为配置时区）
+    eventTime = new Date();
+    console.warn("⚠️ 未找到消息时间戳，使用当前服务器时间作为唤醒时间");
   }
+  const formatted = formatDateTimeInTimeZone(eventTime, TIME_ZONE);
+  console.log(`✅ 最后用户消息时间（唤醒时间）: ${formatted}`);
 } else {
   console.warn("⚠️ 没有用户消息");
 }

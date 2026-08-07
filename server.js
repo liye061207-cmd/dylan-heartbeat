@@ -572,8 +572,8 @@ app.post("/v1/chat/completions", async (req, reply) => {
       if (msg.role === "tool") continue;
       let ts = extractTimestamp(normalizeContentToText(msg.content));
       if (!ts) {
-        ts = new Date(); // 提取失败则使用当前服务器时间
-        console.log(`🕐 为消息生成服务器时间: ${ts.toISOString()}`);
+        ts = new Date(); 
+        // console.log(`🕐 为消息生成服务器时间: ${ts.toISOString()}`);
       }
       const fp = makeFingerprint(msg);
       const fpStripped = makeFingerprintStripped(msg);

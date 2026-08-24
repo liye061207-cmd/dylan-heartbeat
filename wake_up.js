@@ -334,6 +334,12 @@ function shouldWake(lastUserTime) {
 
 function parseTimelineTimestamp(value) {
   const text = String(value || "");
+  // 兼容 <current_time>Mon 26-08-24 13:35:59</current_time> 格式
+  const ctMatch = text.match(/<current_time>\w+\s+(\d{2})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})<\/current_time>/);
+  if (ctMatch) {
+    const [, yy, mm, dd, hour, minute] = ctMatch;
+    return zonedWallTimeToDate({ year: `20${yy}`, month: mm, day: dd, hour, minute }, TIME_ZONE);
+  }
   const match = text.match(/（?\s*(\d{4})([-/])(\d{1,2})\2(\d{1,2})(?:[ T]?)(\d{1,2})[:：](\d{2})/);
   if (!match) return null;
   const [, yyyy, , month, day, hour, minute] = match;
@@ -426,7 +432,7 @@ async function runWakeUp() {
   const cleanMessages = stripPosition(messages);
 
   const historyText = cleanMessages
-    .filter(msg => msg.role !== "system")
+    .filter(msg => msg.role !== "system" && msg.role !== "event")
     .filter(msg => {
       const c = normalizeContentToText(msg.content);
       return !c.includes("<memories>") && !c.includes("记忆库使用策略");

@@ -400,7 +400,7 @@ function appendSpecialEvent(content) {
   for (const msg of timeline) {
     if (msg.position && msg.position > maxPos) maxPos = msg.position;
   }
-  const newEvent = { role: "event", content, position: maxPos + 0.5 };
+  const newEvent = { role: "assistant", content, position: maxPos + 0.5 };
   timeline.push(newEvent);
   saveTimeline(timeline);
   // 批注 2026-07-15：特殊事件可能包含推送正文；日志只记录长度，避免公开部署时泄漏私密内容。
@@ -619,7 +619,24 @@ app.post("/v1/chat/completions", async (req, reply) => {
       if (!inserted) llmMessages.push(event);
     }
 
-
+    // 注入推送日志：读取独立文件，以明确标注格式告知 AI 这是自己的推送记录
+    const PUSH_LOG_FILE = path.join(__dirname, "push_log.json");
+    try {
+      if (fs.existsSync(PUSH_LOG_FILE)) {
+        const pushLog = JSON.parse(fs.readFileSync(PUSH_LOG_FILE, "utf-8"));
+        if (pushLog.length > 0) {
+          const pushSummary = pushLog.map(e => `- ${e.time}: ${e.content}`).join("\n");
+          llmMessages.unshift({
+            role: "system",
+            content: `【以下是你在用户离开期间发送的推送记录，不是对话内容。用户回来后可能会回复其中某条，请据此理解上下文。】\n${pushSummary}\n【推送记录结束】`
+          });
+          // 清空日志，避免下次对话重复注入
+          fs.writeFileSync(PUSH_LOG_FILE, "[]", "utf-8");
+        }
+      }
+    } catch (err) {
+      console.error("注入推送日志失败:", err.message);
+    }
 
     console.log(JSON.stringify({
       event: "llm_forward_summary",
@@ -748,9 +765,20 @@ app.post("/v1/chat/completions", async (req, reply) => {
 // ========================
 app.post("/internal/wake-event", async (req, reply) => {
   try {
-    const { content } = req.body;
+    const { content, messageContent } = req.body;
     if (!content) return reply.code(400).send({ error: "content is required" });
     appendSpecialEvent(content);
+    // 如果有推送正文，单独存一条 assistant 消息，让 AI 能看到自己推送了什么
+    if (messageContent) {
+      const timeline = loadTimeline();
+      let maxPos = 0;
+      for (const msg of timeline) {
+        if (msg.position && msg.position > maxPos) maxPos = msg.position;
+      }
+      const pushMsg = { role: "assistant", content: messageContent, position: maxPos + 0.6 };
+      timeline.push(pushMsg);
+      saveTimeline(timeline);
+    }
     reply.send({ success: true });
   } catch (err) {
     console.error(err);

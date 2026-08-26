@@ -334,12 +334,14 @@ function shouldWake(lastUserTime) {
 
 function parseTimelineTimestamp(value) {
   const text = String(value || "");
-  // 兼容 <current_time>Mon 26-08-24 13:35:59</current_time> 格式
-  const ctMatch = text.match(/<current_time>\w+\s+(\d{2})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})<\/current_time>/);
+  // 兼容 <current_time> 标签格式：Tue 26-08-25 00:26:23（年-月-日）
+  const ctMatch = text.match(/<current_time>\s*\w+\s+(\d{1,2})[-/](\d{1,2})[-/](\d{1,2})\s+(\d{1,2}):(\d{2})/);
   if (ctMatch) {
-    const [, yy, mm, dd, hour, minute] = ctMatch;
-    return zonedWallTimeToDate({ year: `20${yy}`, month: mm, day: dd, hour, minute }, TIME_ZONE);
+    const [, yy, month, day, hour, minute] = ctMatch;
+    const year = 2000 + parseInt(yy, 10);
+    return zonedWallTimeToDate({ year: String(year), month, day, hour, minute }, TIME_ZONE);
   }
+  // 原有格式：YYYY-MM-DD HH:mm 或 （YYYY-MM-DD HH:mm）
   const match = text.match(/（?\s*(\d{4})([-/])(\d{1,2})\2(\d{1,2})(?:[ T]?)(\d{1,2})[:：](\d{2})/);
   if (!match) return null;
   const [, yyyy, , month, day, hour, minute] = match;
@@ -432,7 +434,7 @@ async function runWakeUp() {
   const cleanMessages = stripPosition(messages);
 
   const historyText = cleanMessages
-    .filter(msg => msg.role !== "system" && msg.role !== "event")
+    .filter(msg => msg.role !== "system")
     .filter(msg => {
       const c = normalizeContentToText(msg.content);
       return !c.includes("<memories>") && !c.includes("记忆库使用策略");
@@ -597,18 +599,18 @@ ${historyText}`
     }
   }
 
+  // 将推送事件写入独立日志文件，供对话时注入（不污染聊天记录）
+  const PUSH_LOG_FILE = path.join(__dirname, "push_log.json");
   try {
-    const eventResponse = await fetch(GATEWAY_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content: eventContent })
-    });
-    if (!eventResponse.ok) {
-      throw new Error(`Gateway 返回 HTTP ${eventResponse.status}`);
+    let pushLog = [];
+    if (fs.existsSync(PUSH_LOG_FILE)) {
+      pushLog = JSON.parse(fs.readFileSync(PUSH_LOG_FILE, "utf-8"));
     }
-    console.log("\n已通过 Gateway 记录唤醒事件\n");
+    pushLog.push({ time: getLocalTimeString(), content: eventContent });
+    fs.writeFileSync(PUSH_LOG_FILE, JSON.stringify(pushLog, null, 2), "utf-8");
+    console.log("\n已记录推送事件到本地日志\n");
   } catch (err) {
-    console.error("\n记录唤醒事件失败（Gateway 是否运行？）:\n", err.message);
+    console.error("\n记录推送事件失败:\n", err.message);
   }
 }
 

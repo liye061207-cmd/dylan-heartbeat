@@ -566,7 +566,8 @@ ${historyText}`
     // 按行处理
     const lines = barkText.split("\n").filter(line => line.trim() !== "");
 
-    let title, body;
+    let title = '', body = '';
+    let eventContent = '';
     if (lines.length === 0) {
       console.log("\n推送内容清洗后为空，本次不发送推送\n");
       eventContent = `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：推送内容为空）`;

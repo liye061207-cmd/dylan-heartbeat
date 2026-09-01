@@ -333,7 +333,8 @@ function buildTimeline(kelivoMessages, tsDB) {
     return 0;
   });
 
-  const merged = [...newRealMessages];
+  const oldRealMessages = oldTimeline.filter(isRealMessageForTimeline).map(normalizeMessageForTimeline);
+  const merged = [...oldRealMessages, ...newRealMessages];
   for (const event of oldSpecialEvents) {
     const eventTime = extractTimestampWithMemory(event, tsDB);
     if (!eventTime) { merged.push(event); continue; }

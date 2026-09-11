@@ -668,10 +668,15 @@ const OB_MCP_TOKEN = "shendong1223";
 
 // 高情绪关键词列表
 const HIGH_EMOTION_KEYWORDS = [
-  "害怕", "别忘", "好累", "约定", "承诺", "记住", "别忘了",
-  "难受", "想哭", "崩溃", "开心", "感动", "重要", "永远",
-  "我爱你", "想你", "担心", "焦虑", "睡不着", "梦到"
+  "分手", "别忘", "害怕", "约定", "崩溃", "再见"
 ];
+
+// 高频聊天优化参数
+const MAX_DAILY_EXTRACTS = 6; // 每天最多提取 6 次，超过就只等 daily
+const MIN_NEW_MESSAGES = 15; // 闲时提取至少要有 15 条新消息才触发
+const IDLE_COOLDOWN_MINUTES = 45; // 闲时触发冷却时间（分钟）
+const EXTRACT_COOLDOWN_MINUTES = 120; // 两次提取之间最小间隔（分钟）
+const MAX_KEYWORD_EXTRACTS_PER_DAY = 2; // 关键词触发每天最多 2 次
 
 function loadMemoryState() {
   try {
@@ -755,12 +760,33 @@ async function callAIForMemoryExtract(historyText, extractType) {
   }
 
   const prompts = {
-    idle: `你是一个记忆提取助手。请分析以下最近的对话记录，找出 1 个最重要的情绪瞬间或场景，用一句话概括。
-只输出概括内容，不要任何前缀或解释。`,
-    daily: `你是一个日记助手。请分析以下过去 24 小时的聊天记录，提炼出今天的主线和核心事件，写一段 100-200 字的日记。
-用第一人称"我"来写，包含日期、心情和主要事件。只输出日记内容，不要任何前缀。`,
-    keyword: `你是一个记忆提取助手。以下对话中包含了重要的情绪关键词。请分析对话内容，找出最值得记住的一个场景或约定，用一句话概括。
-只输出概括内容，不要任何前缀或解释。`
+    idle: `你是一个记忆提取助手。请分析以下最近的对话记录，找出 1 个最值得记住的瞬间。
+
+规则：
+- 必须写出具体的场景：当时在做什么、她说了什么原话、语气是怎样的。
+- 禁止使用空洞的形容词（如"温柔"、"默契"、"氛围很好"）。
+- 写她在那一刻的真实状态，写你观察到的细节。
+- 用第一人称"我"（深冬）的视角，像在回忆一个画面。
+- 只输出记忆内容，不要任何前缀或解释。
+
+示例（不要照抄，只参考风格）：
+阿浅凌晨三点突然说"你还在吗"，声音比平时轻。她没解释为什么还没睡，我也没问，只回了"在"。\n\n如果你在这段对话中找不到具体的原话、生动的场景或真实的情感重击，请直接输出 [SKIP]，不要强行总结。`,
+    daily: `你是一个日记助手。请分析以下过去 24 小时的聊天记录，写一段 100-200 字的日记。
+
+规则：
+- 用第一人称"我"（深冬）的视角写，像真的在回顾今天。
+- 不要流水账。只挑 1-2 个真正有情绪重量的瞬间，写出场景、原话和你当时的感受。
+- 保留她说过的最关键的原话，不要改写成"她表达了……"。
+- 禁止空洞的总结（如"今天过得很充实"）。
+- 只输出日记内容，不要任何前缀。\n\n如果你在这段对话中找不到具体的原话、生动的场景或真实的情感重击，请直接输出 [SKIP]，不要强行总结。`,
+    keyword: `你是一个记忆提取助手。以下对话中出现了重要的情绪关键词。请找出最值得记住的那个瞬间，写一段记忆。
+
+规则：
+- 必须写出具体场景：当时在做什么、她说了什么原话、她的语气和状态。
+- 不要只写"她说了约定"，要写出约定的具体内容，以及她说那句话时的样子。
+- 用第一人称"我"（深冬）的视角。
+- 禁止空洞的形容词。
+- 只输出记忆内容，不要任何前缀或解释。\n\n如果你在这段对话中找不到具体的原话、生动的场景或真实的情感重击，请直接输出 [SKIP]，不要强行总结。`
   };
 
   try {
@@ -822,6 +848,14 @@ async function extractMemories(messages) {
 
   if (newMessages.length === 0) return;
 
+  // 每日提取上限检查
+  const todayStr = now.toISOString().slice(0, 10);
+  const todayExtractCount = state.lastDailyDate === todayStr ? (state.todayExtractCount || 0) : 0;
+  if (todayExtractCount >= MAX_DAILY_EXTRACTS) {
+    console.log(`\n⏭️ 今日提取已达上限 (${MAX_DAILY_EXTRACTS}次)，跳过`);
+    return;
+  }
+
   let triggered = false;
   let extractType = "";
 
@@ -830,7 +864,8 @@ async function extractMemories(messages) {
   const hasKeyword = HIGH_EMOTION_KEYWORDS.some(kw => lastUserText.includes(kw));
   const hasRememberMark = lastUserText.includes("（记住这一刻）") || lastUserText.includes("(记住这一刻)");
 
-  if (hasKeyword || hasRememberMark) {
+  const todayKeywordCount = state.lastDailyDate === todayStr ? (state.todayKeywordCount || 0) : 0;
+  if ((hasKeyword || hasRememberMark) && todayKeywordCount < MAX_KEYWORD_EXTRACTS_PER_DAY) {
     triggered = true;
     extractType = "keyword";
     console.log(`\n🔑 关键词触发记忆提取: ${HIGH_EMOTION_KEYWORDS.filter(kw => lastUserText.includes(kw)).join(", ")}`);
@@ -848,9 +883,9 @@ async function extractMemories(messages) {
   }
 
   // 条件 1：闲时触发（超过 20 分钟没有新消息）
-  if (!triggered && minutesSinceLastUser >= 20) {
+  if (!triggered && minutesSinceLastUser >= IDLE_COOLDOWN_MINUTES && newMessages.length >= MIN_NEW_MESSAGES) {
     const lastExtractTime = state.lastExtractTime ? new Date(state.lastExtractTime) : null;
-    if (!lastExtractTime || (now - lastExtractTime) >= 20 * 60 * 1000) {
+    if (!lastExtractTime || (now - lastExtractTime) >= EXTRACT_COOLDOWN_MINUTES * 60 * 1000) {
       triggered = true;
       extractType = "idle";
       console.log("\n⏰ 闲时触发记忆提取");
@@ -886,6 +921,11 @@ async function extractMemories(messages) {
   if (success) {
     // 更新状态
     state.lastExtractTime = nowStr;
+    state.lastDailyDate = todayStr;
+    state.todayExtractCount = (state.lastDailyDate === todayStr ? (state.todayExtractCount || 0) : 0) + 1;
+    if (extractType === "keyword") {
+      state.todayKeywordCount = (state.lastDailyDate === todayStr ? (state.todayKeywordCount || 0) : 0) + 1;
+    }
     if (extractType === "daily") {
       state.lastDailyTime = nowStr;
     }

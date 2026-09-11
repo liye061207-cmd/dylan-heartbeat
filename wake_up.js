@@ -921,10 +921,15 @@ async function extractMemories(messages) {
   if (success) {
     // 更新状态
     state.lastExtractTime = nowStr;
+    // 跨天重置计数
+    if (state.lastDailyDate !== todayStr) {
+      state.todayExtractCount = 0;
+      state.todayKeywordCount = 0;
+    }
     state.lastDailyDate = todayStr;
-    state.todayExtractCount = (state.lastDailyDate === todayStr ? (state.todayExtractCount || 0) : 0) + 1;
+    state.todayExtractCount = (state.todayExtractCount || 0) + 1;
     if (extractType === "keyword") {
-      state.todayKeywordCount = (state.lastDailyDate === todayStr ? (state.todayKeywordCount || 0) : 0) + 1;
+      state.todayKeywordCount = (state.todayKeywordCount || 0) + 1;
     }
     if (extractType === "daily") {
       state.lastDailyTime = nowStr;

@@ -415,6 +415,11 @@ async function runWakeUp() {
   const messages = loadTimelineMessages();
   if (!messages) return;
 
+  
+  // 自动记忆提取（后台静默运行，不阻塞唤醒流程）
+  extractMemories(messages).catch(err => {
+    console.error("记忆提取出错:", err.message);
+  });
   const lastUserTime = getLastUserTime(messages);
   if (!lastUserTime) {
     console.log("未找到用户时间");
@@ -651,3 +656,251 @@ console.log(JSON.stringify({
   data_dir_ready: fs.existsSync(DATA_DIR)
 }));
 console.log("==================================\n");
+
+// ============================================================
+// 自动记忆提取模块
+// 三个触发条件：闲时触发、每日汇总、关键词触发
+// ============================================================
+
+const MEMORY_STATE_FILE = path.join(__dirname, "memory_extract_state.json");
+const OB_MCP_URL = "http://127.0.0.1:8000/mcp";
+const OB_MCP_TOKEN = "shendong1223";
+
+// 高情绪关键词列表
+const HIGH_EMOTION_KEYWORDS = [
+  "害怕", "别忘", "好累", "约定", "承诺", "记住", "别忘了",
+  "难受", "想哭", "崩溃", "开心", "感动", "重要", "永远",
+  "我爱你", "想你", "担心", "焦虑", "睡不着", "梦到"
+];
+
+function loadMemoryState() {
+  try {
+    if (fs.existsSync(MEMORY_STATE_FILE)) {
+      return JSON.parse(fs.readFileSync(MEMORY_STATE_FILE, "utf-8"));
+    }
+  } catch (e) {}
+  return { lastExtractTime: null, lastDailyTime: null, extractedMessageIds: [] };
+}
+
+function saveMemoryState(state) {
+  try {
+    fs.writeFileSync(MEMORY_STATE_FILE, JSON.stringify(state, null, 2), "utf-8");
+  } catch (e) {
+    console.error("保存记忆提取状态失败:", e.message);
+  }
+}
+
+// 通过 OB MCP 接口写入记忆
+async function writeToOB(content, importance = 5, pinned = false) {
+  try {
+    // 1. 初始化 MCP 会话
+    const initResp = await fetch(OB_MCP_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "Authorization": `Bearer ${OB_MCP_TOKEN}`
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-03-26",
+          capabilities: {},
+          clientInfo: { name: "heartbeat-memory", version: "1.0.0" }
+        }
+      })
+    });
+    const sessionId = initResp.headers.get("mcp-session-id");
+    if (!sessionId) {
+      console.log("MCP 初始化失败：未获取到 session ID");
+      return false;
+    }
+    await initResp.text(); // 消费响应体
+
+    // 2. 调用 hold 工具
+    const holdResp = await fetch(OB_MCP_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "Authorization": `Bearer ${OB_MCP_TOKEN}`,
+        "mcp-session-id": sessionId
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "hold",
+          arguments: { content, importance, pinned }
+        }
+      })
+    });
+    const resultText = await holdResp.text();
+    console.log(`OB 记忆写入结果: ${resultText.slice(0, 200)}`);
+    return true;
+  } catch (e) {
+    console.error("OB 记忆写入失败:", e.message);
+    return false;
+  }
+}
+
+// 调用 AI 分析对话并提取记忆
+async function callAIForMemoryExtract(historyText, extractType) {
+  if (!process.env.TARGET_API_URL || !process.env.TARGET_API_KEY) {
+    console.log("缺少 API 配置，跳过记忆提取");
+    return null;
+  }
+
+  const prompts = {
+    idle: `你是一个记忆提取助手。请分析以下最近的对话记录，找出 1 个最重要的情绪瞬间或场景，用一句话概括。
+只输出概括内容，不要任何前缀或解释。`,
+    daily: `你是一个日记助手。请分析以下过去 24 小时的聊天记录，提炼出今天的主线和核心事件，写一段 100-200 字的日记。
+用第一人称"我"来写，包含日期、心情和主要事件。只输出日记内容，不要任何前缀。`,
+    keyword: `你是一个记忆提取助手。以下对话中包含了重要的情绪关键词。请分析对话内容，找出最值得记住的一个场景或约定，用一句话概括。
+只输出概括内容，不要任何前缀或解释。`
+  };
+
+  try {
+    const response = await fetch(process.env.TARGET_API_URL, {
+      method: "POST",
+      signal: AbortSignal.timeout(60000),
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.TARGET_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: process.env.MODEL_NAME || "deepseek-v4-flash-0731",
+        messages: [
+          { role: "system", content: prompts[extractType] || prompts.idle },
+          { role: "user", content: historyText }
+        ],
+        temperature: 0.3,
+        max_tokens: 500,
+        stream: false
+      })
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      console.log(`记忆提取 AI 请求失败: HTTP ${response.status}`);
+      return null;
+    }
+    const text = (data.choices?.[0]?.message?.content || "").trim();
+    return text || null;
+  } catch (e) {
+    console.error("记忆提取 AI 调用失败:", e.message);
+    return null;
+  }
+}
+
+// 主函数：检查三个触发条件并执行记忆提取
+async function extractMemories(messages) {
+  if (!messages || messages.length === 0) return;
+
+  const state = loadMemoryState();
+  const now = new Date();
+  const nowHour = now.getHours();
+  const nowStr = now.toISOString();
+
+  // 过滤出用户和助手的消息
+  const chatMessages = messages.filter(m => m.role === "user" || m.role === "assistant");
+  if (chatMessages.length === 0) return;
+
+  // 获取最后一条用户消息的时间
+  const lastUserMsg = [...chatMessages].reverse().find(m => m.role === "user");
+  if (!lastUserMsg) return;
+  const lastUserTime = parseTimelineTimestamp(lastUserMsg.content) || new Date();
+  const minutesSinceLastUser = Math.floor((now - lastUserTime) / 1000 / 60);
+
+  // 获取未提取的新消息
+  const newMessages = chatMessages.filter(m => {
+    const msgId = `${m.role}_${normalizeContentToText(m.content).slice(0, 50)}`;
+    return !state.extractedMessageIds.includes(msgId);
+  });
+
+  if (newMessages.length === 0) return;
+
+  let triggered = false;
+  let extractType = "";
+
+  // 条件 3：关键词/情绪触发（高光时刻）
+  const lastUserText = normalizeContentToText(lastUserMsg.content);
+  const hasKeyword = HIGH_EMOTION_KEYWORDS.some(kw => lastUserText.includes(kw));
+  const hasRememberMark = lastUserText.includes("（记住这一刻）") || lastUserText.includes("(记住这一刻)");
+
+  if (hasKeyword || hasRememberMark) {
+    triggered = true;
+    extractType = "keyword";
+    console.log(`\n🔑 关键词触发记忆提取: ${HIGH_EMOTION_KEYWORDS.filter(kw => lastUserText.includes(kw)).join(", ")}`);
+  }
+
+  // 条件 2：每日汇总（凌晨 3-4 点，每天一次）
+  if (!triggered && nowHour >= 3 && nowHour < 5) {
+    const todayStr = now.toISOString().slice(0, 10);
+    const lastDailyDate = state.lastDailyTime ? state.lastDailyTime.slice(0, 10) : "";
+    if (todayStr !== lastDailyDate) {
+      triggered = true;
+      extractType = "daily";
+      console.log("\n📅 每日汇总触发记忆提取");
+    }
+  }
+
+  // 条件 1：闲时触发（超过 20 分钟没有新消息）
+  if (!triggered && minutesSinceLastUser >= 20) {
+    const lastExtractTime = state.lastExtractTime ? new Date(state.lastExtractTime) : null;
+    if (!lastExtractTime || (now - lastExtractTime) >= 20 * 60 * 1000) {
+      triggered = true;
+      extractType = "idle";
+      console.log("\n⏰ 闲时触发记忆提取");
+    }
+  }
+
+  if (!triggered) return;
+
+  // 构建对话历史文本（取最近 20 条新消息）
+  const recentMessages = newMessages.slice(-20);
+  const historyText = recentMessages.map(m => {
+    const role = m.role === "user" ? "阿浅" : "深冬";
+    const content = normalizeContentToText(m.content).slice(0, 500);
+    return `[${role}] ${content}`;
+  }).join("\n");
+
+  console.log(`记忆提取类型: ${extractType}, 消息数: ${recentMessages.length}`);
+
+  // 调用 AI 分析
+  const extracted = await callAIForMemoryExtract(historyText, extractType);
+  if (!extracted) {
+    console.log("AI 未返回有效内容");
+    return;
+  }
+
+  console.log(`AI 提取结果: ${extracted.slice(0, 100)}`);
+
+  // 写入 OB
+  const importance = extractType === "daily" ? 8 : 6;
+  const pinned = extractType === "keyword";
+  const success = await writeToOB(extracted, importance, pinned);
+
+  if (success) {
+    // 更新状态
+    state.lastExtractTime = nowStr;
+    if (extractType === "daily") {
+      state.lastDailyTime = nowStr;
+    }
+    // 记录已提取的消息
+    recentMessages.forEach(m => {
+      const msgId = `${m.role}_${normalizeContentToText(m.content).slice(0, 50)}`;
+      if (!state.extractedMessageIds.includes(msgId)) {
+        state.extractedMessageIds.push(msgId);
+      }
+    });
+    // 只保留最近 200 条记录
+    if (state.extractedMessageIds.length > 200) {
+      state.extractedMessageIds = state.extractedMessageIds.slice(-200);
+    }
+    saveMemoryState(state);
+    console.log("✅ 记忆提取完成");
+  }
+}

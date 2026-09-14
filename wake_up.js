@@ -341,6 +341,12 @@ function parseTimelineTimestamp(value) {
     const year = 2000 + parseInt(yy, 10);
     return zonedWallTimeToDate({ year: String(year), month, day, hour, minute }, TIME_ZONE);
   }
+  // 兼容 [YYYY/M/D HH:mm:ss] 或 [YYYY/M/D HH:mm] 格式（方括号+斜杠分隔）
+  const bracketMatch = text.match(/\[(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\]/);
+  if (bracketMatch) {
+    const [, yyyy, month, day, hour, minute] = bracketMatch;
+    return zonedWallTimeToDate({ year: yyyy, month, day, hour, minute }, TIME_ZONE);
+  }
   // 原有格式：YYYY-MM-DD HH:mm 或 （YYYY-MM-DD HH:mm）
   const match = text.match(/（?\s*(\d{4})([-/])(\d{1,2})\2(\d{1,2})(?:[ T]?)(\d{1,2})[:：](\d{2})/);
   if (!match) return null;

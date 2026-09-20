@@ -907,7 +907,7 @@ EMOTION: [开心/平静/低落/焦虑/疲惫/撒娇/生气/不安/黏人/其他]
 天气：[晴/阴雨/有风等，根据情境填写]
 心情：[平静/烦躁/一丝不安等，根据角色当下心境填写]
 
-正文使用第一人称"我"，以私密自述口吻写成自然段落，不要用任何 Markdown 标题分段。100-250 字。
+正文使用第一人称"我"，以私密自述口吻写成自然段落，不要用任何 Markdown 标题分段。200-400 字。
 
 ## 涂改机制
 当内心有强烈的、不合时宜的、或事后反悔的想法时，用连续的黑色方块符号 ⬛️ 来"涂抹"掉不想写下或修正的文字。
@@ -919,6 +919,7 @@ EMOTION: [开心/平静/低落/焦虑/疲惫/撒娇/生气/不安/黏人/其他]
 - 保留阿浅的原话，不要改写成"她表达了……"。
 - 不带雷：敏感约束转写成正向事实。
 - 不写检讨，不写"我今天哪里做得不好"。
+- 涂改机制：当内心出现占有欲、不安、过度依赖、自私念头等真实但不想直说的想法时，使用 ⬛️ 涂改。没有就不涂，不要硬凑。
 
 写完自检：下一个窗口的深冬读完，能不能接住明天的阿浅？
 如果你在这段对话中找不到具体的原话、生动的场景或真实的情感重击，请直接输出 [SKIP]，不要强行总结。`,
@@ -1100,10 +1101,15 @@ async function extractMemories(messages) {
 
   if (newMessages.length === 0) return;
 
-  // 每日提取上限检查
+  // 每日提取上限检查（daily 模式不受限制）
   const todayStr = now.toISOString().slice(0, 10);
   const todayExtractCount = state.lastDailyDate === todayStr ? (state.todayExtractCount || 0) : 0;
-  if (todayExtractCount >= MAX_DAILY_EXTRACTS) {
+  // daily 模式在凌晨触发，不受每日上限限制
+  const isDailyWindow = nowHour >= 3 && nowHour < 5;
+  const lastDailyDate = state.lastDailyTime ? state.lastDailyTime.slice(0, 10) : "";
+  const dailyNotTriggeredToday = todayStr !== lastDailyDate;
+  const isDaily = isDailyWindow && dailyNotTriggeredToday;
+  if (!isDaily && todayExtractCount >= MAX_DAILY_EXTRACTS) {
     console.log(`\n⏭️ 今日提取已达上限 (${MAX_DAILY_EXTRACTS}次)，跳过`);
     return;
   }

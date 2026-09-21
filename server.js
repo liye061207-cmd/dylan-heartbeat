@@ -1798,4 +1798,5 @@ app.listen({ port: PORT, host: "0.0.0.0" }, (err, address) => {
     data_dir_ready: fs.existsSync(DATA_DIR)
   }));
   console.log(`✅ Gateway 运行在 ${address}`);
+
 });

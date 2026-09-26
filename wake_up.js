@@ -424,9 +424,12 @@ async function runWakeUp() {
 
   
   // 自动记忆提取（后台静默运行，不阻塞唤醒流程）
-  extractMemories(messages).catch(err => {
-    console.error("记忆提取出错:", err.message);
-  });
+  // 通过环境变量 MEMORY_EXTRACT_ENABLED=true 开启
+  if (process.env.MEMORY_EXTRACT_ENABLED === 'true') {
+    extractMemories(messages).catch(err => {
+      console.error("记忆提取出错:", err.message);
+    });
+  }
   const lastUserTime = getLastUserTime(messages);
   if (!lastUserTime) {
     console.log("未找到用户时间");

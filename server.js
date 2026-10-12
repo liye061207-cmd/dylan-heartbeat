@@ -728,6 +728,17 @@ app.post("/v1/chat/completions", async (req, reply) => {
 
     const upstreamContentType = response.headers.get("content-type") || "";
     const shouldStreamResponse = requestedStream || upstreamContentType.includes("text/event-stream");
+    // 心潮同步：异步发送对话内容到心潮，不阻塞主流程
+    const xinchaoUrl = process.env.XINCHAO_URL || "http://localhost:18110/v1/conversation-event";
+    const xinchaoToken = process.env.XINCHAO_TOKEN || "";
+    if (xinchaoToken) {
+      const userMessages = kelivoMessages.filter(m => m.role === "user" || m.role === "assistant");
+      fetch(xinchaoUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + xinchaoToken },
+        body: JSON.stringify({ exchange: userMessages.slice(-6) })
+      }).catch(() => {});
+    }
 
     // 批注 2026-07-11：Kelivo 关闭 stream 时需要收到普通 JSON；只在请求或上游确认为 SSE 时才按流式直通。
     if (!shouldStreamResponse) {

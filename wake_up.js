@@ -334,6 +334,12 @@ function shouldWake(lastUserTime) {
 
 function parseTimelineTimestamp(value) {
   const text = String(value || "");
+  // 兼容 <sent_at> 标签格式：<sent_at 2026-10-12 13:21>
+  const sentMatch = text.match(/<sent_at\s+(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})>/);
+  if (sentMatch) {
+    const [, yyyy, month, day, hour, minute] = sentMatch;
+    return zonedWallTimeToDate({ year: yyyy, month, day, hour, minute }, TIME_ZONE);
+  }
   // 兼容 <current_time> 标签格式：Tue 26-08-25 00:26:23（年-月-日）
   const ctMatch = text.match(/<current_time>\s*\w+\s+(\d{1,2})[-/](\d{1,2})[-/](\d{1,2})\s+(\d{1,2}):(\d{2})/);
   if (ctMatch) {

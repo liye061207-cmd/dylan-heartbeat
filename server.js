@@ -716,6 +716,85 @@ app.post("/v1/chat/completions", async (req, reply) => {
 
     const requestedStream = body?.stream === true;
 
+    // ========== 心潮智能网关：记忆检索 + 情绪注入（安全版 v3） ==========
+    try {
+      const gatewayUserMessage = (llmMessages || [])
+        .filter(m => m && m.role === 'user' && typeof m.content === 'string')
+        .pop()?.content || '';
+
+      if (gatewayUserMessage) {
+        const fetchWithTimeout = (url, options, ms) => {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), ms);
+          return fetch(url, { ...options, signal: controller.signal })
+            .finally(() => clearTimeout(timer));
+        };
+
+        const [memoryResult, stateResult] = await Promise.allSettled([
+          // ① OB MCP breath 检索记忆
+          (async () => {
+            const obToken = process.env.OMBRE_MCP_TOKEN;
+            if (!obToken) return '';
+            const res = await fetchWithTimeout('http://127.0.0.1:18001/mcp', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json, text/event-stream',
+                'Authorization': 'Bearer ' + obToken
+              },
+              body: JSON.stringify({
+                jsonrpc: '2.0',
+                id: Date.now(),
+                method: 'tools/call',
+                params: { name: 'breath', arguments: { query: gatewayUserMessage.slice(0, 200) } }
+              })
+            }, 2500);
+            if (!res.ok) throw new Error('OB HTTP ' + res.status);
+            const raw = await res.text();
+            for (const line of raw.split('\n')) {
+              if (line.startsWith('data: ')) {
+                try {
+                  const parsed = JSON.parse(line.slice(6));
+                  return parsed?.result?.content?.[0]?.text || '';
+                } catch (e) { /* 跳过非 JSON 行 */ }
+              }
+            }
+            return '';
+          })(),
+
+          // ② 心潮 /v1/now 状态
+          (async () => {
+            const xToken = process.env.XINCHAO_TOKEN;
+            if (!xToken) return '';
+            const res = await fetchWithTimeout('http://127.0.0.1:18110/v1/now', {
+              headers: { 'Authorization': 'Bearer ' + xToken }
+            }, 1500);
+            if (!res.ok) throw new Error('Xinchao HTTP ' + res.status);
+            const data = await res.json();
+            return data.text || '';
+          })()
+        ]);
+
+        const memoryText = memoryResult.status === 'fulfilled' && memoryResult.value
+          ? '[相关记忆]\n' + memoryResult.value.slice(0, 500)
+          : '';
+        const stateText = stateResult.status === 'fulfilled' && stateResult.value
+          ? stateResult.value
+          : '';
+
+        const injectedContext = [stateText, memoryText].filter(Boolean).join('\n\n');
+        if (injectedContext && Array.isArray(llmMessages)) {
+          llmMessages.unshift({ role: 'system', content: injectedContext });
+          console.log('[Heartbeat] ✅ 注入上下文:', injectedContext.slice(0, 150).replace(/\n/g, ' '));
+        } else {
+          console.log('[Heartbeat] ⚠️ 未注入（空上下文或 llmMessages 非数组）');
+        }
+      }
+    } catch (gatewayErr) {
+      console.error('[Heartbeat] ⚠️ 网关注入异常（不影响主流程）:', gatewayErr.message);
+    }
+    // ========== 心潮智能网关结束 ==========
+
     // 请求模型
     const response = await fetch(TARGET_API_URL, {
       method: "POST",

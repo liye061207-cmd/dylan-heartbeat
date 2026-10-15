@@ -812,10 +812,15 @@ app.post("/v1/chat/completions", async (req, reply) => {
     const xinchaoToken = process.env.XINCHAO_TOKEN || "";
     if (xinchaoToken) {
       const userMessages = kelivoMessages.filter(m => m.role === "user" || m.role === "assistant");
+      const exchangeText = userMessages.slice(-6).map(m => {
+        const prefix = m.role === "user" ? "她说：" : "他回：";
+        const content = typeof m.content === "string" ? m.content : (Array.isArray(m.content) ? m.content.map(c => c.text || "").join("") : "");
+        return prefix + content;
+      }).join("\n");
       fetch(xinchaoUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": "Bearer " + xinchaoToken },
-        body: JSON.stringify({ exchange: userMessages.slice(-6) })
+        body: JSON.stringify({ exchange: exchangeText })
       }).catch(() => {});
     }
 

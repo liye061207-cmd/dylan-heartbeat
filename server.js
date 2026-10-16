@@ -1,5 +1,167 @@
 require("dotenv").config({ quiet: true });
 
+// 记忆检索缓存：相同查询 5 分钟内复用结果
+const memoryCache = new Map();
+const MEMORY_CACHE_TTL = 5 * 60 * 1000; // 5 分钟
+
+// 会话级记忆注入状态（学习 Shoal：门控 + 冷却 + 保守召回）
+const sessionMemoryState = new Map(); // sessionId → { lastQuery, lastInjectedIds: Set, lastInjectTime, cooldownUntil }
+const MEMORY_COOLDOWN_MS = 3 * 60 * 1000;  // 同一会话 3 分钟内不重复注入
+const BM25_MIN_SCORE = 0.3;                // BM25 分数低于此值不注入（保守召回）
+const QUERY_SIMILARITY_THRESHOLD = 0.6;    // 与上次查询相似度高于此值跳过检索（门控）
+
+// ========== 本地记忆索引（解决 aru 缓存断点问题） ==========
+// 启动时从 OB 拉取全量记忆快照，后续请求走本地 BM25 检索，不再每次调 OB MCP
+// 这样系统提示结构固定，aru 缓存不会因记忆检索结果变化而失效
+let localMemoryStore = [];           // [{ id, content, summary }]
+let localMemoryIndex = null;        // { bigramIndex: Map<bigram, Set<docId>>, docs: [] }
+let localMemoryReady = false;
+let localMemoryLastSync = 0;
+const LOCAL_MEMORY_SYNC_INTERVAL = 10 * 60 * 1000; // 10 分钟同步一次
+
+// 简化版 BM25 分词：字符 bigram
+function bigramTokenize(text) {
+  const cleaned = (text || '').replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, '');
+  const grams = [];
+  for (let i = 0; i < cleaned.length - 1; i++) {
+    grams.push(cleaned.slice(i, i + 2));
+  }
+  return grams;
+}
+
+// 建立本地 BM25 索引
+function buildLocalMemoryIndex(memories) {
+  const bigramIndex = new Map(); // bigram → Set<docId>
+  const docs = memories.map((m, i) => {
+    const grams = bigramTokenize(m.content || m.summary || '');
+    const tf = {};
+    for (const g of grams) {
+      tf[g] = (tf[g] || 0) + 1;
+      if (!bigramIndex.has(g)) bigramIndex.set(g, new Set());
+      bigramIndex.get(g).add(i);
+    }
+    return { id: m.id, content: m.content, summary: m.summary, grams, tf, docLen: grams.length };
+  });
+  const avgDocLen = docs.length > 0 ? docs.reduce((s, d) => s + d.docLen, 0) / docs.length : 1;
+  return { bigramIndex, docs, avgDocLen, totalDocs: docs.length };
+}
+
+// 本地 BM25 检索（k1=1.2, b=0.75）
+function localBM25Search(query, topN = 5) {
+  if (!localMemoryIndex || localMemoryIndex.totalDocs === 0) return [];
+  const { bigramIndex, docs, avgDocLen, totalDocs } = localMemoryIndex;
+  const queryGrams = bigramTokenize(query);
+  if (queryGrams.length === 0) return [];
+
+  const k1 = 1.2, b = 0.75;
+  const scores = new Map();
+
+  for (const qg of queryGrams) {
+    const docSet = bigramIndex.get(qg);
+    if (!docSet) continue;
+    const df = docSet.size;
+    const idf = Math.log(1 + (totalDocs - df + 0.5) / (df + 0.5));
+    for (const docId of docSet) {
+      const doc = docs[docId];
+      const tf = doc.tf[qg] || 0;
+      const numerator = tf * (k1 + 1);
+      const denominator = tf + k1 * (1 - b + b * (doc.docLen / avgDocLen));
+      const score = idf * (numerator / denominator);
+      scores.set(docId, (scores.get(docId) || 0) + score);
+    }
+  }
+
+  return Array.from(scores.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, topN)
+    .map(([docId, score]) => ({ ...docs[docId], score }));
+}
+
+// 从 OB 拉取全量记忆快照
+async function syncLocalMemoryFromOB() {
+  const obToken = readEnvValue('OMBRE_MCP_TOKEN');
+  if (!obToken) {
+    console.log('[Heartbeat] ⚠️ 本地记忆同步跳过：未配置 OMBRE_MCP_TOKEN');
+    return;
+  }
+  try {
+    console.log('[Heartbeat] 🔄 开始从 OB 同步记忆快照...');
+    // 建立 MCP 会话
+    const initRes = await fetch('http://127.0.0.1:18001/mcp', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json, text/event-stream',
+        'Authorization': 'Bearer ' + obToken
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0', id: Date.now(), method: 'initialize',
+        params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'heartbeat', version: '1.0' } }
+      }),
+      signal: AbortSignal.timeout(5000)
+    });
+    if (!initRes.ok) throw new Error('OB init HTTP ' + initRes.status);
+    const sessionId = initRes.headers.get('mcp-session-id') || '';
+    if (!sessionId) throw new Error('未获取到 MCP 会话 ID');
+
+    // 拉取全量记忆目录（catalog 模式，不受权重限制）
+    const res = await fetch('http://127.0.0.1:18001/mcp', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json, text/event-stream',
+        'Authorization': 'Bearer ' + obToken,
+        'Mcp-Session-Id': sessionId
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0', id: Date.now() + 1, method: 'tools/call',
+        params: { name: 'breath', arguments: { catalog: true, max_tokens: 80000 } }
+      }),
+      signal: AbortSignal.timeout(30000)
+    });
+    if (!res.ok) throw new Error('OB HTTP ' + res.status);
+
+    const raw = await res.text();
+    let fullText = '';
+    for (const line of raw.split('\n')) {
+      if (line.startsWith('data: ')) {
+        try {
+          const parsed = JSON.parse(line.slice(6));
+          fullText += (parsed?.result?.content?.[0]?.text || '') + '\n';
+        } catch (e) { /* 跳过非 JSON 行 */ }
+      }
+    }
+
+    // 解析 catalog 格式：每行「标题 | 域 | 权重」或「📌标题 | 域 | 权重」
+    const memories = [];
+    const lines = fullText.split('\n');
+    for (const line of lines) {
+      const cleaned = line.replace(/^[📌📦💭🛡️🗑️]\s*/, '').trim();
+      if (!cleaned || cleaned.startsWith('===') || cleaned.startsWith('先看') || cleaned.startsWith('---')) continue;
+      const parts = cleaned.split('|');
+      const title = parts[0]?.trim() || '';
+      const domain = parts[1]?.trim() || '';
+      if (title) {
+        memories.push({
+          id: 'cat_' + memories.length,
+          content: title + (domain ? ' [' + domain + ']' : ''),
+          summary: title
+        });
+      }
+    }
+
+    if (memories.length > 0) {
+      localMemoryStore = memories;
+      localMemoryIndex = buildLocalMemoryIndex(memories);
+      localMemoryReady = true;
+      localMemoryLastSync = Date.now();
+      console.log(`[Heartbeat] ✅ 本地记忆同步完成：${memories.length} 条记忆已索引`);
+    }
+  } catch (err) {
+    console.error('[Heartbeat] ⚠️ 本地记忆同步失败（不影响服务启动）:', err.message);
+  }
+}
+
 const Fastify = require("fastify");
 const fs = require("fs-extra");
 const path = require("path");
@@ -718,9 +880,14 @@ app.post("/v1/chat/completions", async (req, reply) => {
 
     // ========== 心潮智能网关：记忆检索 + 情绪注入（安全版 v3） ==========
     try {
-      const gatewayUserMessage = (llmMessages || [])
+      const gatewayUserMessage = ((llmMessages || [])
         .filter(m => m && m.role === 'user' && typeof m.content === 'string')
-        .pop()?.content || '';
+        .pop()?.content || '')
+        .replace(/<sent_at\s+[^>]+>/g, '')
+        .replace(/<current_time>.*?<\/current_time>/g, '')
+        .replace(/<environment>.*?<\/environment>/gs, '')
+        .replace(/\[\d{4}\/\d{1,2}\/\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?\]/g, '')
+        .trim();
 
       if (gatewayUserMessage) {
         const fetchWithTimeout = (url, options, ms) => {
@@ -731,11 +898,43 @@ app.post("/v1/chat/completions", async (req, reply) => {
         };
 
         const [memoryResult, stateResult] = await Promise.allSettled([
-          // ① OB MCP breath 检索记忆
+          // ① OB MCP breath 检索记忆（带缓存）
           (async () => {
+            const query = gatewayUserMessage.slice(0, 200);
+            const cacheKey = query.toLowerCase().trim();
+
+            // 第一层：memoryCache（5 分钟 TTL，精确匹配）
+            const cached = memoryCache.get(cacheKey);
+            if (cached && cached.expires > Date.now()) {
+              console.log('[Heartbeat] 🟢 记忆缓存命中:', cacheKey.slice(0, 50));
+              return cached.value;
+            }
+
+            // 第二层：本地 BM25 索引检索（不影响 aru 缓存结构）
+            if (localMemoryReady && localMemoryIndex && localMemoryIndex.totalDocs > 0) {
+              const localResults = localBM25Search(query, 5);
+              if (localResults.length > 0) {
+                // 保守召回：最高分低于阈值则不注入
+                const topScore = localResults[0].score;
+                if (topScore < BM25_MIN_SCORE) {
+                  console.log('[Heartbeat] ⚪ 本地 BM25 分数过低 (%.2f < %.2f)，跳过注入', topScore, BM25_MIN_SCORE);
+                  return '';
+                }
+                const resultText = localResults
+                  .map(r => r.content.slice(0, 400))
+                  .join('\n---\n');
+                memoryCache.set(cacheKey, { value: resultText, expires: Date.now() + MEMORY_CACHE_TTL });
+                console.log('[Heartbeat] 🔵 本地 BM25 命中:', localResults.length, '条, topScore:', topScore.toFixed(2), ', cacheKey:', cacheKey.slice(0, 50));
+                return resultText;
+              }
+              console.log('[Heartbeat] ⚪ 本地 BM25 未命中，回退 OB MCP');
+            }
+
+            // 第三层：回退 OB MCP breath（本地索引未就绪或无结果时）
             const obToken = process.env.OMBRE_MCP_TOKEN;
             if (!obToken) return '';
-            const res = await fetchWithTimeout('http://127.0.0.1:18001/mcp', {
+            // 先建立 MCP 会话
+            const initRes = await fetchWithTimeout('http://127.0.0.1:18001/mcp', {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
@@ -745,6 +944,25 @@ app.post("/v1/chat/completions", async (req, reply) => {
               body: JSON.stringify({
                 jsonrpc: '2.0',
                 id: Date.now(),
+                method: 'initialize',
+                params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'heartbeat', version: '1.0' } }
+              })
+            }, 2500);
+            if (!initRes.ok) throw new Error('OB init HTTP ' + initRes.status);
+            const sessionId = initRes.headers.get('mcp-session-id') || '';
+            if (!sessionId) return '';
+            // 调用 breath 工具
+            const res = await fetchWithTimeout('http://127.0.0.1:18001/mcp', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json, text/event-stream',
+                'Authorization': 'Bearer ' + obToken,
+                'Mcp-Session-Id': sessionId
+              },
+              body: JSON.stringify({
+                jsonrpc: '2.0',
+                id: Date.now() + 1,
                 method: 'tools/call',
                 params: { name: 'breath', arguments: { query: gatewayUserMessage.slice(0, 200) } }
               })
@@ -755,7 +973,17 @@ app.post("/v1/chat/completions", async (req, reply) => {
               if (line.startsWith('data: ')) {
                 try {
                   const parsed = JSON.parse(line.slice(6));
-                  return parsed?.result?.content?.[0]?.text || '';
+                  let resultText = parsed?.result?.content?.[0]?.text || '';
+                  // 过滤 OB 返回的无意义提示（避免暴露给 AI 对话）
+                  if (resultText && /没有匹配到|token 预算不足|检索降级|请提高 max_tokens|换个关键词试试/.test(resultText)) {
+                    console.log('[Heartbeat] ⚠️ OB 返回提示文本，已过滤:', resultText.slice(0, 60));
+                    return '';
+                  }
+                  if (resultText) {
+                    memoryCache.set(cacheKey, { value: resultText, expires: Date.now() + MEMORY_CACHE_TTL });
+                    console.log('[Heartbeat] 💾 记忆缓存写入:', cacheKey.slice(0, 50));
+                  }
+                  return resultText;
                 } catch (e) { /* 跳过非 JSON 行 */ }
               }
             }
@@ -776,18 +1004,51 @@ app.post("/v1/chat/completions", async (req, reply) => {
         ]);
 
         const memoryText = memoryResult.status === 'fulfilled' && memoryResult.value
-          ? '[相关记忆]\n' + memoryResult.value.slice(0, 500)
+          ? '\n\n[以下是与当前对话可能相关的记忆，仅供参考，若无关请忽略]\n' + memoryResult.value.slice(0, 500)
+              // 清理 OB 返回的元数据标记，保留正文
+              .replace(/\[bucket_id:[^\]]+\]/g, '')
+              .replace(/\[content_role:[^\]]+\]/g, '')
+              .replace(/\[query 命中[^\]]*\]/g, '')
+              .replace(/\n{3,}/g, '\n\n')
+              .trim()
           : '';
         const stateText = stateResult.status === 'fulfilled' && stateResult.value
           ? stateResult.value
           : '';
 
-        const injectedContext = [stateText, memoryText].filter(Boolean).join('\n\n');
-        if (injectedContext && Array.isArray(llmMessages)) {
-          llmMessages.unshift({ role: 'system', content: injectedContext });
-          console.log('[Heartbeat] ✅ 注入上下文:', injectedContext.slice(0, 150).replace(/\n/g, ' '));
-        } else {
-          console.log('[Heartbeat] ⚠️ 未注入（空上下文或 llmMessages 非数组）');
+        // 心潮状态注入系统提示（格式固定，不影响 aru 缓存）
+        if (stateText && Array.isArray(llmMessages)) {
+          llmMessages.unshift({ role: 'system', content: stateText });
+          console.log('[Heartbeat] ✅ 注入心潮状态:', stateText.slice(0, 80).replace(/\n/g, ' '));
+        }
+
+        // 记忆文本追加到用户消息末尾（不改变系统提示结构，aru 缓存不断）
+        if (memoryText && Array.isArray(llmMessages)) {
+          // 生成会话指纹（用第一条用户消息的前 100 字符哈希）
+          const firstUserMsg = llmMessages.filter(m => m.role === 'user')[0];
+          const sessionFingerprint = firstUserMsg && typeof firstUserMsg.content === 'string'
+            ? String(require('crypto').createHash('md5').update(firstUserMsg.content.slice(0, 100)).digest('hex')).slice(0, 8)
+            : 'default';
+
+          // 冷却检查：同一会话 3 分钟内不重复注入
+          const now = Date.now();
+          const sessionState = sessionMemoryState.get(sessionFingerprint);
+          if (sessionState && sessionState.cooldownUntil > now) {
+            const remaining = Math.ceil((sessionState.cooldownUntil - now) / 1000);
+            console.log('[Heartbeat] ⏳ 冷却中，跳过注入 (剩余 %ds, session: %s)', remaining, sessionFingerprint);
+          } else {
+            const lastUserMsg = llmMessages.filter(m => m.role === 'user').pop();
+            if (lastUserMsg && typeof lastUserMsg.content === 'string') {
+              lastUserMsg.content += memoryText;
+              // 更新会话状态：记录注入时间和冷却期
+              sessionMemoryState.set(sessionFingerprint, {
+                lastQuery: gatewayUserMessage.slice(0, 100),
+                lastInjectTime: now,
+                cooldownUntil: now + MEMORY_COOLDOWN_MS
+              });
+              console.log('[Heartbeat] ✅ 记忆追加到用户消息 (session: %s):', sessionFingerprint, memoryText.slice(0, 80).replace(/\n/g, ' '));
+            }
+          }
         }
       }
     } catch (gatewayErr) {
@@ -1893,5 +2154,17 @@ app.listen({ port: PORT, host: "0.0.0.0" }, (err, address) => {
     data_dir_ready: fs.existsSync(DATA_DIR)
   }));
   console.log(`✅ Gateway 运行在 ${address}`);
+
+  // 启动后延迟同步本地记忆索引（等 OB 服务就绪）
+  setTimeout(() => {
+    syncLocalMemoryFromOB().then(() => {
+      // 设置定期同步（每 10 分钟）
+      setInterval(() => {
+        if (Date.now() - localMemoryLastSync > LOCAL_MEMORY_SYNC_INTERVAL) {
+          syncLocalMemoryFromOB();
+        }
+      }, LOCAL_MEMORY_SYNC_INTERVAL);
+    });
+  }, 3000);
 
 });

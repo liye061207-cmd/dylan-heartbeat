@@ -15,6 +15,7 @@ const {
 // 批注 2026-08-10：与 Gateway 共用同一 DATA_DIR；未配置时仍落回项目目录，保护旧 VPS/本机部署。
 const DATA_DIR = ensureDataDir();
 const TIMELINE_PATH = runtimeFile("enhanced_messages.json");
+const TIMESTAMP_DB_PATH = runtimeFile("message_timestamps.json");
 const PORT = Number(process.env.PORT) || 3000;
 const GATEWAY_BASE_URL = (process.env.GATEWAY_BASE_URL || `http://localhost:${PORT}`).replace(/\/+$/, "");
 const GATEWAY_URL = `${GATEWAY_BASE_URL}/internal/wake-event`;
@@ -360,6 +361,35 @@ function parseTimelineTimestamp(value) {
   return zonedWallTimeToDate({ year: yyyy, month, day, hour, minute }, TIME_ZONE);
 }
 
+function stripTimelineTags(text) {
+  return String(text || "")
+    .replace(/<sent_at[^>]*>/g, "")
+    .replace(/<current_time>[^<]*<\/current_time>/g, "")
+    .replace(/<environment>[\s\S]*?<\/environment>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+function loadTimestampDb() {
+  try {
+    if (!fs.existsSync(TIMESTAMP_DB_PATH)) return {};
+    return JSON.parse(fs.readFileSync(TIMESTAMP_DB_PATH, "utf-8"));
+  } catch {
+    return {};
+  }
+}
+function buildTimestampIndex() {
+  const db = loadTimestampDb();
+  const index = {};
+  for (const [key, value] of Object.entries(db)) {
+    const sep = key.indexOf("::");
+    if (sep < 0) continue;
+    const role = key.slice(0, sep);
+    const body = stripTimelineTags(key.slice(sep + 2)).slice(0, 150);
+    const norm = `${role}::${body}`;
+    if (!(norm in index)) index[norm] = value;
+  }
+  return index;
+}
 function getLastUserTime(messages) {
   const reversed = [...messages].reverse();
   for (const msg of reversed) {
@@ -369,6 +399,17 @@ function getLastUserTime(messages) {
       // 旧的 "YYYY-MM-DD HH:mm" 仍然可用，避免无空格时间导致 wake-up 误判没有用户时间。
       const parsed = parseTimelineTimestamp(content);
       if (parsed) return parsed;
+    }
+  }
+  // 批注 2026-10-21：消息正文常不带时间标签（Kelivo 新版仅在独立时间库记录），
+  // 正文查不到时回退到 message_timestamps.json 按指纹匹配，避免误判「未找到用户时间」。
+  const index = buildTimestampIndex();
+  for (const msg of reversed) {
+    if (msg.role !== "user") continue;
+    const key = `user::${stripTimelineTags(normalizeContentToText(msg.content)).slice(0, 150)}`;
+    if (index[key]) {
+      const recovered = new Date(index[key]);
+      if (!Number.isNaN(recovered.getTime())) return recovered;
     }
   }
   return null;
@@ -650,7 +691,14 @@ async function scheduleNextCheck() {
     } catch {}
     await runWakeUp();
   } catch (err) {
-    console.error("唤醒检查出错:", err);
+    // 批注 2026-10-21：上游超时/中止属常见抖动，只记一行可读信息，不刷完整堆栈。
+    const name = err && err.name ? err.name : "Error";
+    const message = err && err.message ? err.message : String(err);
+    if (name === "TimeoutError" || name === "AbortError") {
+      console.error(`唤醒检查超时（上游无响应），本轮跳过：${message}`);
+    } else {
+      console.error(`唤醒检查出错：${name}: ${message}`);
+    }
   }
   setTimeout(scheduleNextCheck, getCheckIntervalMs());
 }

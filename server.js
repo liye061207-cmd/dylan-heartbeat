@@ -1004,7 +1004,7 @@ app.post("/v1/chat/completions", async (req, reply) => {
         ]);
 
         const memoryText = memoryResult.status === 'fulfilled' && memoryResult.value
-          ? '\n\n[以下是与当前对话可能相关的记忆，仅供参考，若无关请忽略]\n' + memoryResult.value.slice(0, 500)
+          ? '\n\n[你忽然想起这些，不必提起，合适时自然带一句]\n' + memoryResult.value.slice(0, 500)
               // 清理 OB 返回的元数据标记，保留正文
               .replace(/\[bucket_id:[^\]]+\]/g, '')
               .replace(/\[content_role:[^\]]+\]/g, '')

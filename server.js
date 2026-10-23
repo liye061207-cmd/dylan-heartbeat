@@ -1003,6 +1003,12 @@ app.post("/v1/chat/completions", async (req, reply) => {
           })()
         ]);
 
+        // 生成会话指纹（用第一条用户消息的前 100 字符哈希）；提升到此处供记忆冷却与心潮事件共用
+        const firstUserMsg = llmMessages.filter(m => m.role === 'user')[0];
+        const sessionFingerprint = firstUserMsg && typeof firstUserMsg.content === 'string'
+          ? String(require('crypto').createHash('md5').update(firstUserMsg.content.slice(0, 100)).digest('hex')).slice(0, 8)
+          : 'default';
+
         const memoryText = memoryResult.status === 'fulfilled' && memoryResult.value
           ? '\n\n[你忽然想起这些，不必提起，合适时自然带一句]\n' + memoryResult.value.slice(0, 500)
               // 清理 OB 返回的元数据标记，保留正文
@@ -1024,12 +1030,6 @@ app.post("/v1/chat/completions", async (req, reply) => {
 
         // 记忆文本追加到用户消息末尾（不改变系统提示结构，aru 缓存不断）
         if (memoryText && Array.isArray(llmMessages)) {
-          // 生成会话指纹（用第一条用户消息的前 100 字符哈希）
-          const firstUserMsg = llmMessages.filter(m => m.role === 'user')[0];
-          const sessionFingerprint = firstUserMsg && typeof firstUserMsg.content === 'string'
-            ? String(require('crypto').createHash('md5').update(firstUserMsg.content.slice(0, 100)).digest('hex')).slice(0, 8)
-            : 'default';
-
           // 冷却检查：同一会话 3 分钟内不重复注入
           const now = Date.now();
           const sessionState = sessionMemoryState.get(sessionFingerprint);
@@ -1063,7 +1063,7 @@ app.post("/v1/chat/completions", async (req, reply) => {
         "Content-Type": "application/json",
         Authorization: `Bearer ${process.env.TARGET_API_KEY}`
       },
-      body: JSON.stringify({ ...body, messages: llmMessages })
+      body: JSON.stringify({ ...body, messages: llmMessages, thinking: { type: 'disabled' } })
     });
 
     const upstreamContentType = response.headers.get("content-type") || "";
@@ -1081,7 +1081,7 @@ app.post("/v1/chat/completions", async (req, reply) => {
       fetch(xinchaoUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": "Bearer " + xinchaoToken },
-        body: JSON.stringify({ exchange: exchangeText })
+        body: JSON.stringify({ eventId: `hb-${sessionFingerprint}-${Date.now()}`, sessionId: sessionFingerprint, exchange: exchangeText })
       }).catch(() => {});
     }
 

@@ -756,6 +756,14 @@ app.post("/v1/chat/completions", async (req, reply) => {
       .map(prepareMessageForLLM)
       .filter(Boolean);
 
+    // 10-24 修：会话指纹原本定义在心潮网关的 try 块内，但下面的 xinchao 事件回传写在 try 外面，
+    // 作用域不覆盖会抛 ReferenceError: sessionFingerprint is not defined。
+    // 提到 try 之前，让记忆冷却与事件回传两处都能看见。
+    const firstUserMsg = llmMessages.filter(m => m.role === 'user')[0];
+    const sessionFingerprint = firstUserMsg && typeof firstUserMsg.content === 'string'
+      ? String(require('crypto').createHash('md5').update(firstUserMsg.content.slice(0, 100)).digest('hex')).slice(0, 8)
+      : 'default';
+
     const oldEvents = stripPosition(
       oldTimeline.filter(isSpecialEvent).sort((a, b) => {
         const timeA = extractTimestampWithMemory(a, tsDB);
@@ -1003,11 +1011,7 @@ app.post("/v1/chat/completions", async (req, reply) => {
           })()
         ]);
 
-        // 生成会话指纹（用第一条用户消息的前 100 字符哈希）；提升到此处供记忆冷却与心潮事件共用
-        const firstUserMsg = llmMessages.filter(m => m.role === 'user')[0];
-        const sessionFingerprint = firstUserMsg && typeof firstUserMsg.content === 'string'
-          ? String(require('crypto').createHash('md5').update(firstUserMsg.content.slice(0, 100)).digest('hex')).slice(0, 8)
-          : 'default';
+        // 会话指纹已在进入网关 try 之前算好（见上方 sessionFingerprint 定义），此处不再重复计算。
 
         const memoryText = memoryResult.status === 'fulfilled' && memoryResult.value
           ? '\n\n[你忽然想起这些，不必提起，合适时自然带一句]\n' + memoryResult.value.slice(0, 500)

@@ -669,9 +669,15 @@ ${historyText}`
     if (fs.existsSync(PUSH_LOG_FILE)) {
       pushLog = JSON.parse(fs.readFileSync(PUSH_LOG_FILE, "utf-8"));
     }
-    pushLog.push({ time: getLocalTimeString(), content: eventContent });
-    fs.writeFileSync(PUSH_LOG_FILE, JSON.stringify(pushLog, null, 2), "utf-8");
-    console.log("\n已记录推送事件到本地日志\n");
+    // 10-24：eventContent 在某些分支下是 undefined，会写入只有 time 没有 content 的空壳，
+    // 对 AI 上下文无意义还占篇幅。没有正文就不记。
+    if (!eventContent || !String(eventContent).trim()) {
+      console.log("\n推送内容为空，跳过记录到本地日志\n");
+    } else {
+      pushLog.push({ time: getLocalTimeString(), content: eventContent });
+      fs.writeFileSync(PUSH_LOG_FILE, JSON.stringify(pushLog, null, 2), "utf-8");
+      console.log("\n已记录推送事件到本地日志\n");
+    }
   } catch (err) {
     console.error("\n记录推送事件失败:\n", err.message);
   }

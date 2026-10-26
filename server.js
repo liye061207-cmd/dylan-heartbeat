@@ -908,7 +908,7 @@ app.post("/v1/chat/completions", async (req, reply) => {
         const [memoryResult, stateResult] = await Promise.allSettled([
           // ① OB MCP breath 检索记忆（带缓存）
           (async () => {
-            const query = gatewayUserMessage.slice(0, 200);
+            const query = gatewayUserMessage.slice(0, 400);
             const cacheKey = query.toLowerCase().trim();
 
             // 第一层：memoryCache（5 分钟 TTL，精确匹配）
@@ -955,7 +955,7 @@ app.post("/v1/chat/completions", async (req, reply) => {
                 method: 'initialize',
                 params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'heartbeat', version: '1.0' } }
               })
-            }, 2500);
+            }, 5000);
             if (!initRes.ok) throw new Error('OB init HTTP ' + initRes.status);
             const sessionId = initRes.headers.get('mcp-session-id') || '';
             if (!sessionId) return '';
@@ -972,9 +972,9 @@ app.post("/v1/chat/completions", async (req, reply) => {
                 jsonrpc: '2.0',
                 id: Date.now() + 1,
                 method: 'tools/call',
-                params: { name: 'breath', arguments: { query: gatewayUserMessage.slice(0, 200) } }
+                params: { name: 'breath', arguments: { query: gatewayUserMessage.slice(0, 400) } }
               })
-            }, 2500);
+            }, 5000);
             if (!res.ok) throw new Error('OB HTTP ' + res.status);
             const raw = await res.text();
             for (const line of raw.split('\n')) {
@@ -1014,7 +1014,7 @@ app.post("/v1/chat/completions", async (req, reply) => {
         // 会话指纹已在进入网关 try 之前算好（见上方 sessionFingerprint 定义），此处不再重复计算。
 
         const memoryText = memoryResult.status === 'fulfilled' && memoryResult.value
-          ? '\n\n[你忽然想起这些，不必提起，合适时自然带一句]\n' + memoryResult.value.slice(0, 500)
+          ? '\n\n[你忽然想起这些，不必提起，合适时自然带一句]\n' + memoryResult.value.slice(0, 1500)
               // 清理 OB 返回的元数据标记，保留正文
               .replace(/\[bucket_id:[^\]]+\]/g, '')
               .replace(/\[content_role:[^\]]+\]/g, '')
@@ -1025,10 +1025,17 @@ app.post("/v1/chat/completions", async (req, reply) => {
         const stateText = stateResult.status === 'fulfilled' && stateResult.value
           ? stateResult.value
           : '';
+        // 掰正死引用：xinchao_context 在 MCP 工具目录中无对应入口，改为指向真实工具
+        if (stateText) stateText = stateText.replace(/细的在 xinchao_context/g, '细的可调浮现记忆查看');
 
         // 心潮状态注入系统提示（格式固定，不影响 aru 缓存）
         if (stateText && Array.isArray(llmMessages)) {
-          llmMessages.unshift({ role: 'system', content: stateText });
+          // 插到最后一条 user 消息之前，避免从数组头部打断缓存前缀
+          let __insertAt = llmMessages.length;
+          for (let __i = llmMessages.length - 1; __i >= 0; __i--) {
+            if (llmMessages[__i].role === 'user') { __insertAt = __i; break; }
+          }
+          llmMessages.splice(__insertAt, 0, { role: 'system', content: stateText });
           console.log('[Heartbeat] ✅ 注入心潮状态:', stateText.slice(0, 80).replace(/\n/g, ' '));
         }
 

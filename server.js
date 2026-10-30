@@ -1022,7 +1022,7 @@ app.post("/v1/chat/completions", async (req, reply) => {
               .replace(/\n{3,}/g, '\n\n')
               .trim()
           : '';
-        const stateText = stateResult.status === 'fulfilled' && stateResult.value
+        let stateText = stateResult.status === 'fulfilled' && stateResult.value
           ? stateResult.value
           : '';
         // 掰正死引用：xinchao_context 在 MCP 工具目录中无对应入口，改为指向真实工具
@@ -1089,10 +1089,11 @@ app.post("/v1/chat/completions", async (req, reply) => {
         const content = typeof m.content === "string" ? m.content : (Array.isArray(m.content) ? m.content.map(c => c.text || "").join("") : "");
         return prefix + content;
       }).join("\n");
+      const sfp = typeof sessionFingerprint !== 'undefined' ? sessionFingerprint : 'default';
       fetch(xinchaoUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": "Bearer " + xinchaoToken },
-        body: JSON.stringify({ eventId: `hb-${sessionFingerprint}-${Date.now()}`, sessionId: sessionFingerprint, exchange: exchangeText })
+        body: JSON.stringify({ eventId: `hb-${sfp}-${Date.now()}`, sessionId: sfp, exchange: exchangeText })
       }).catch(() => {});
     }
 

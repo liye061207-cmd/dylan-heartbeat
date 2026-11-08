@@ -327,10 +327,49 @@ function getLocalTimeString() {
   return formatDateTimeInTimeZone(new Date(), TIME_ZONE);
 }
 
+// 批注 2026-11-08：原先只判断距用户最后一条消息多久，静默超过阈值后每轮检查都会放行，
+// 导致 AI 每一轮都有资格推送。这里补一层推送冷却，距上次成功推送不足
+// PUSH_COOLDOWN_MINUTES（默认 180 分钟）就不再通过。
+const LAST_PUSH_FILE = runtimeFile("last_push.json");
+function readLastPushTime() {
+  try {
+    if (!fs.existsSync(LAST_PUSH_FILE)) return null;
+    const raw = fs.readFileSync(LAST_PUSH_FILE, "utf-8").trim();
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    const ts = new Date(data.time || 0).getTime();
+    return Number.isFinite(ts) && ts > 0 ? ts : null;
+  } catch (err) {
+    return null;
+  }
+}
+function writeLastPushTime(date = new Date()) {
+  try {
+    const payload = { time: date.toISOString(), local: getLocalTimeString() };
+    fs.writeFileSync(LAST_PUSH_FILE, JSON.stringify(payload, null, 2), "utf-8");
+  } catch (err) {
+    console.error("记录最后推送时间失败:", err.message);
+  }
+}
+function getPushCooldownMinutes() {
+  return readNumberEnv("PUSH_COOLDOWN_MINUTES", 180, { min: 0 });
+}
 function shouldWake(lastUserTime) {
   const now = getNow();
   const diffMinutes = Math.floor((now - new Date(lastUserTime)) / 1000 / 60);
-  return diffMinutes >= getWakeAfterMinutes(now);
+  if (diffMinutes < getWakeAfterMinutes(now)) return false;
+  const cooldown = getPushCooldownMinutes();
+  if (cooldown > 0) {
+    const lastPush = readLastPushTime();
+    if (lastPush) {
+      const sincePush = Math.floor((now - lastPush) / 1000 / 60);
+      if (sincePush < cooldown) {
+        console.log(`推送冷却中：距上次推送 ${sincePush} 分钟，未满 ${cooldown} 分钟，本轮跳过`);
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 function parseTimelineTimestamp(value) {
@@ -657,6 +696,7 @@ ${historyText}`
         console.log(`\n${pushResult.providerLabel} 推送失败，本次不发送推送\n`);
         eventContent = `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：${pushResult.providerLabel} 推送失败：${pushResult.reason}）`;
       } else {
+        writeLastPushTime();
         eventContent = `（${getLocalTimeString()} 刚刚给用户发了${pushResult.providerLabel}推送：${safeTitle}｜${safeBody}）`;
       }
     }

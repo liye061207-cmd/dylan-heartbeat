@@ -40,7 +40,7 @@ function buildLocalMemoryIndex(memories) {
       if (!bigramIndex.has(g)) bigramIndex.set(g, new Set());
       bigramIndex.get(g).add(i);
     }
-    return { id: m.id, content: m.content, summary: m.summary, grams, tf, docLen: grams.length };
+    return { id: m.id, content: m.content, summary: m.summary, importance: m.importance || 5, grams, tf, docLen: grams.length };
   });
   const avgDocLen = docs.length > 0 ? docs.reduce((s, d) => s + d.docLen, 0) / docs.length : 1;
   return { bigramIndex, docs, avgDocLen, totalDocs: docs.length };
@@ -71,10 +71,83 @@ function localBM25Search(query, topN = 5) {
     }
   }
 
-  return Array.from(scores.entries())
+  // 重要度加权：OB 目录第三列（1-10）作为先验，5 为中性
+  const weighted = Array.from(scores.entries()).map(([docId, score]) => {
+    const imp = docs[docId].importance || 5;
+    return [docId, score * (0.6 + 0.08 * imp)];
+  });
+  return weighted
     .sort((a, b) => b[1] - a[1])
     .slice(0, topN)
     .map(([docId, score]) => ({ ...docs[docId], score }));
+}
+
+// 清掉 breath 返回里的元数据头部，只留正文
+function cleanBreathText(text) {
+  return (text || '')
+    .split('\n')
+    .filter(l => !/^\s*📌/.test(l))
+    .map(l => l.replace(/\[(bucket_id|domain|tags|content_role|instructions):[^\]]*\]/g, '').trim())
+    .filter(l => l)
+    .join('\n')
+    .trim();
+}
+
+// 调 OB MCP breath 做语义检索；失败返回空串，调用方回退本地索引
+async function obBreathSearch(query, maxResults, maxTokens) {
+  const obToken = readEnvValue('OMBRE_MCP_TOKEN');
+  if (!obToken) return '';
+  try {
+    const initRes = await fetch('http://127.0.0.1:18001/mcp', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json, text/event-stream',
+        'Authorization': 'Bearer ' + obToken
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0', id: Date.now(), method: 'initialize',
+        params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'heartbeat-semantic', version: '1.0' } }
+      }),
+      signal: AbortSignal.timeout(5000)
+    });
+    if (!initRes.ok) return '';
+    const sid = initRes.headers.get('mcp-session-id') || '';
+    if (!sid) return '';
+    const res = await fetch('http://127.0.0.1:18001/mcp', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json, text/event-stream',
+        'Authorization': 'Bearer ' + obToken,
+        'Mcp-Session-Id': sid
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0', id: Date.now() + 1, method: 'tools/call',
+        params: { name: 'breath', arguments: { query: query, max_results: maxResults || 2, max_tokens: maxTokens || 6000 } }
+      }),
+      signal: AbortSignal.timeout(15000)
+    });
+    if (!res.ok) return '';
+    const raw = await res.text();
+    let payload = null;
+    for (const line of raw.split('\n')) {
+      const t = line.trim();
+      if (t.startsWith('data:')) {
+        try { payload = JSON.parse(t.slice(5).trim()); } catch (e) { /* 跳过 */ }
+      }
+    }
+    if (!payload) {
+      try { payload = JSON.parse(raw); } catch (e) { return ''; }
+    }
+    const text = payload && payload.result && payload.result.content && payload.result.content[0]
+      ? payload.result.content[0].text : '';
+    if (!text || text.indexOf('token 预算不足') >= 0) return '';
+    return cleanBreathText(text);
+  } catch (e) {
+    console.log('[Heartbeat] ⚠️ OB 语义检索失败，回退本地索引:', e.message);
+    return '';
+  }
 }
 
 // 从 OB 拉取全量记忆快照
@@ -141,11 +214,13 @@ async function syncLocalMemoryFromOB() {
       const parts = cleaned.split('|');
       const title = parts[0]?.trim() || '';
       const domain = parts[1]?.trim() || '';
+      const importance = parseFloat(parts[2]) || 5;
       if (title) {
         memories.push({
           id: 'cat_' + memories.length,
           content: title + (domain ? ' [' + domain + ']' : ''),
-          summary: title
+          summary: title,
+          importance: importance
         });
       }
     }
@@ -918,7 +993,16 @@ app.post("/v1/chat/completions", async (req, reply) => {
               return cached.value;
             }
 
-            // 第二层：本地 BM25 索引检索（不影响 aru 缓存结构）
+            // 第二层（优先）：OB breath 语义检索，命中即返回
+            const semantic = await obBreathSearch(query, 2, 6000);
+            if (semantic) {
+              const semanticText = semantic.slice(0, 1500);
+              memoryCache.set(cacheKey, { value: semanticText, expires: Date.now() + MEMORY_CACHE_TTL });
+              console.log('[Heartbeat] 🟣 OB 语义检索命中:', semanticText.length, '字符, cacheKey:', cacheKey.slice(0, 50));
+              return semanticText;
+            }
+
+            // 第三层：本地 BM25 索引检索（OB 不可用时兜底，按重要度加权）
             if (localMemoryReady && localMemoryIndex && localMemoryIndex.totalDocs > 0) {
               const localResults = localBM25Search(query, 5);
               if (localResults.length > 0) {

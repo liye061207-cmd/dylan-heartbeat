@@ -3,6 +3,8 @@ const fs = require("fs");
 const path = require("path");
 const { buildNtfyPayload } = require("./ntfy_priority");
 const { ensureDataDir, runtimeDirectory, runtimeFile } = require("./runtime_paths");
+const { buildBlock: buildDateAnchorBlock } = require("./date_anchor");
+const drafts = require("./drafts");
 const { parseChatCompletionResponse } = require("./upstream_response");
 const {
   formatDateTimeInTimeZone,
@@ -493,7 +495,9 @@ async function runWakeUp() {
   }
 
   const weatherContext = await fetchWeatherContext();
-  const wakePrompt = buildWakePrompt(getChinaTimeString(), diffMinutes, weatherContext);
+  let wakePrompt = buildWakePrompt(getChinaTimeString(), diffMinutes, weatherContext);
+  wakePrompt += buildDateAnchorBlock();
+  wakePrompt += drafts.render(5);
   const cleanMessages = stripPosition(messages);
 
   const historyText = cleanMessages
@@ -598,6 +602,11 @@ ${historyText}`
   // 判断 AI 是否明确要静默
   } else if (aiText.match(/^\[NO_ACTION\]\s*(.{0,20})?/)) {
     const noActionMatch = aiText.match(/^\[NO_ACTION\]\s*(.{0,20})?/);
+    const draftMatch = aiText.match(/\[DRAFT\]([\s\S]*?)\[\/DRAFT\]/i);
+    if (draftMatch && draftMatch[1].trim()) {
+      drafts.append(draftMatch[1].trim(), (noActionMatch[1] || "").trim());
+      console.log("[Draft] 存下一句没说的话:", draftMatch[1].trim().slice(0, 50));
+    }
     // AI 选择不发送推送
     console.log("\nAI 选择不发送推送\n");
     let reason = (noActionMatch[1] || "").trim();

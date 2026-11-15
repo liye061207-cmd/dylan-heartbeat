@@ -7,8 +7,12 @@ const MEMORY_CACHE_TTL = 5 * 60 * 1000; // 5 分钟
 // 会话级记忆注入状态（学习 Shoal：门控 + 冷却 + 保守召回）
 const sessionMemoryState = new Map(); // sessionId → { lastQuery, lastInjectedIds: Set, lastInjectTime, cooldownUntil }
 const MEMORY_COOLDOWN_MS = 3 * 60 * 1000;  // 同一会话 3 分钟内不重复注入
+const dateAnchorSessionState = new Map();   // 会话指纹|日期 → 已注入时间（日期锚点，一天一次）
+const spontaneousState = new Map();          // 会话指纹 → 上次随机浮现时间
+const { draw: drawSpontaneousMemory } = require("./recall");
 const BM25_MIN_SCORE = 0.3;                // BM25 分数低于此值不注入（保守召回）
 const QUERY_SIMILARITY_THRESHOLD = 0.6;    // 与上次查询相似度高于此值跳过检索（门控）
+const { buildChatBlock: buildDateAnchorChatBlock } = require("./date_anchor");
 
 // ========== 本地记忆索引（解决 aru 缓存断点问题） ==========
 // 启动时从 OB 拉取全量记忆快照，后续请求走本地 BM25 检索，不再每次调 OB MCP
@@ -1121,6 +1125,47 @@ app.post("/v1/chat/completions", async (req, reply) => {
           }
           llmMessages.splice(__insertAt, 0, { role: 'system', content: stateText });
           console.log('[Heartbeat] ✅ 注入心潮状态:', stateText.slice(0, 80).replace(/\n/g, ' '));
+        }
+
+        // 日期锚点注入：同一会话、同一天只提一次
+        if (Array.isArray(llmMessages)) {
+          try {
+            const anchorText = buildDateAnchorChatBlock();
+            const __anchorDay = new Date().toLocaleDateString('en-CA', { timeZone: process.env.TIME_ZONE || 'Asia/Shanghai' });
+            const __anchorKey = String(sessionFingerprint || 'global') + '|' + __anchorDay;
+            if (dateAnchorSessionState.size > 500) dateAnchorSessionState.clear();
+            if (anchorText && !dateAnchorSessionState.has(__anchorKey)) {
+              dateAnchorSessionState.set(__anchorKey, Date.now());
+              let __anchorAt = llmMessages.length;
+              for (let __ai = llmMessages.length - 1; __ai >= 0; __ai--) {
+                if (llmMessages[__ai].role === 'user') { __anchorAt = __ai; break; }
+              }
+              llmMessages.splice(__anchorAt, 0, { role: 'system', content: anchorText.trim() });
+              console.log('[Heartbeat] ✅ 注入日期锚点:', anchorText.trim().slice(0, 60).replace(/\n/g, ' '));
+            }
+          } catch (e) { /* 锚点失败不影响对话 */ }
+        }
+
+        // 随机浮现：低概率从最重要记忆里抽一条，与当前话题无关
+        if (Array.isArray(llmMessages) && !memoryText) {
+          try {
+            const __rate = parseFloat(process.env.SPONTANEOUS_RECALL_RATE || '0.08');
+            const __fp = String(sessionFingerprint || 'global');
+            const __now = Date.now();
+            const __last = spontaneousState.get(__fp) || 0;
+            if (Math.random() < __rate && __now - __last > 45 * 60 * 1000) {
+              const __echo = await drawSpontaneousMemory();
+              if (__echo) {
+                spontaneousState.set(__fp, __now);
+                let __at = llmMessages.length;
+                for (let __k = llmMessages.length - 1; __k >= 0; __k--) {
+                  if (llmMessages[__k].role === 'user') { __at = __k; break; }
+                }
+                llmMessages.splice(__at, 0, { role: 'system', content: '[你忽然想起一件旧事，和眼前的话题未必有关。想提就自然提一句，不想提就当没想起来]\n' + __echo });
+                console.log('[Heartbeat] 🌫️ 随机浮现:', __echo.slice(0, 60).replace(/\n/g, ' '));
+              }
+            }
+          } catch (e) { /* 浮现失败不影响对话 */ }
         }
 
         // 记忆文本追加到用户消息末尾（不改变系统提示结构，aru 缓存不断）

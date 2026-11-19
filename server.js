@@ -878,7 +878,7 @@ app.post("/v1/chat/completions", async (req, reply) => {
           const pushSummary = pushLog.map(e => `- ${e.time}: ${e.content}`).join("\n");
           llmMessages.unshift({
             role: "system",
-            content: `【以下是你在用户离开期间发送的推送记录，不是对话内容。用户回来后可能会回复其中某条，请据此理解上下文。】\n${pushSummary}\n【推送记录结束】`
+            content: `【以下是你在你的爱人离开期间发送的推送记录，不是对话内容。她回来后可能会回复其中某条，请据此理解上下文。】\n${pushSummary}\n【推送记录结束】`
           });
           // 清空日志，避免下次对话重复注入
           fs.writeFileSync(PUSH_LOG_FILE, "[]", "utf-8");

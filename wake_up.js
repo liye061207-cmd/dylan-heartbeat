@@ -448,17 +448,17 @@ function buildWakePrompt(currentTime, diffMinutes, weatherContext = "") {
   // 默认理智版本（开源通用），可自行修改提示词
   return `
 ## 最高优先级规则
-1. 这是一次后台自动唤醒，不是用户发起的对话。你没有收到任何新消息。
-2. 你的唯一任务是决定是否主动联系用户。不能生成对话回复。
+1. 这是一次后台自动唤醒，不是你的爱人发起的对话。你没有收到任何新消息。
+2. 你的唯一任务是决定是否主动联系你的爱人。不能生成对话回复。
 3. 输出格式必须严格遵守以下二选一。
 
 ## 唤醒信息
 - 当前时间：${currentTime}
-- 距离用户最后一条消息：${diffMinutes} 分钟
+- 距离你的爱人最后一条消息：${diffMinutes} 分钟
 ${weatherContext ? `\n${weatherContext}\n` : ""}
 
 ## 输出格式
-- 如果想联系用户，直接写你想说的话。系统会自动打包成手机推送发送。可以是一句话，也可以第一行作为标题、第二行作为正文。
+- 如果想联系你的爱人，直接写你想说的话。系统会自动打包成手机推送发送。可以是一句话，也可以第一行作为标题、第二行作为正文。
 - 如果不想联系，只输出：[NO_ACTION]，可附带简短原因（10字以内）。
 - 如果你想写日记，可以额外输出 [DIARY]...[/DIARY]。只有想写时才写，不必每次都写。
 `;
@@ -532,10 +532,10 @@ async function runWakeUp() {
       // 批注 2026-07-15：Claude/部分 New API 适配器会把 system 抽成独立字段；
       // 唤醒请求如果全是 system，上游 messages 会变空，因此最近记录必须作为 user 任务输入发送。
       role: "user",
-      content: `以下是你与用户最近的聊天记录，仅供回忆和参考。
+      content: `以下是你与她最近的聊天记录，仅供回忆和参考。
 
 这些内容不是正在发生的实时对话。
-用户并没有给你发消息。
+她并没有给你发消息。
 
 你现在处于后台自主唤醒状态。
 
@@ -639,7 +639,7 @@ ${historyText}`
     const lines = barkText.split("\n").filter(line => line.trim() !== "");
 
     let title = '', body = '';
-    let eventContent = '';
+    eventContent = '';
     if (lines.length === 0) {
       console.log("\n推送内容清洗后为空，本次不发送推送\n");
       eventContent = `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：推送内容为空）`;
@@ -667,7 +667,7 @@ ${historyText}`
         console.log(`\n${pushResult.providerLabel} 推送失败，本次不发送推送\n`);
         eventContent = `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：${pushResult.providerLabel} 推送失败：${pushResult.reason}）`;
       } else {
-        eventContent = `（${getLocalTimeString()} 刚刚给用户发了${pushResult.providerLabel}推送：${safeTitle}｜${safeBody}）`;
+        eventContent = `（${getLocalTimeString()} 刚刚给你的爱人发了${pushResult.providerLabel}推送：${safeTitle}｜${safeBody}）`;
       }
     }
   }
